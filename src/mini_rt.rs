@@ -24,8 +24,10 @@ impl MiniRuntime {
 
     pub fn block_on<F: Future<Output = ()> + Send + 'static>(&mut self, fut: F) {
         self.queue.spawn(Box::pin(fut));
-        while self.queue.run_once() {}
-    }
+        while self.queue.run_once() {
+            println!("[runtime] ran one iteration");
+        }
+    }    
 }
 
 // === JoinHandle ===
@@ -46,13 +48,20 @@ impl JoinHandle {
 impl Future for JoinHandle {
     type Output = ();
 
+    // fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    //     println!("[join_handle] checking if task is done");
+    //     if self.done.load(Ordering::SeqCst) {
+    //         println!("[join_handle] task is done");
+    //         Poll::Ready(())
+    //     } else {
+    //         cx.waker().wake_by_ref();
+    //         Poll::Pending
+    //     }
+    // }
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.done.load(Ordering::SeqCst) {
-            Poll::Ready(())
-        } else {
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
+        println!("[yield_now] yielding");
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 
@@ -92,22 +101,27 @@ impl TaskQueue {
     }
 
     fn spawn(&self, fut: BoxedFuture) {
+        println!("[runtime] spawning a new task");
         self.tasks.lock().unwrap().push_back(fut);
     }
-
+    
     fn run_once(&self) -> bool {
         if let Some(mut fut) = self.tasks.lock().unwrap().pop_front() {
+            println!("[runtime] polling a task...");
             let waker = dummy_waker();
             let mut cx = Context::from_waker(&waker);
             if let Poll::Pending = fut.as_mut().poll(&mut cx) {
+                println!("[runtime] task not ready, pushing it back");
                 self.spawn(fut);
+            } else {
+                println!("[runtime] task completed");
             }
             true
         } else {
             thread::sleep(Duration::from_millis(1));
             false
         }
-    }
+    }    
 }
 
 // === Thread-local access to task queue ===
@@ -159,17 +173,22 @@ impl Future for TimerFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if Instant::now() >= self.wake_time {
+            println!("[sleep] done sleeping");
             Poll::Ready(())
         } else {
+            println!("[sleep] still sleeping...");
             cx.waker().wake_by_ref();
             Poll::Pending
         }
     }
 }
 
+
 // === yield_now ===
 
 pub async fn yield_now() {
+    sleep(Duration::from_millis(1)).await;
+    
     struct YieldNow;
 
     impl Future for YieldNow {

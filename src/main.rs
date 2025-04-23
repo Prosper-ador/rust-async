@@ -20,7 +20,8 @@ async fn long_task() {
     }
 }
 
-fn main() {
+mini_rt! {
+    async fn main() {
     let mut rt = MiniRuntime::new();
     rt.block_on(async {
         let t1 = spawn(async {
@@ -33,6 +34,7 @@ fn main() {
 
         join_all!(t1, h1, h2, h3);
     });
+}
 }
 
 mod mini_rt;
