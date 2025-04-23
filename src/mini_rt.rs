@@ -21,9 +21,9 @@ impl MiniRuntime {
         }
     }
 
-    pub fn block_on<F: Future<Output = ()>>(&mut self, fut: F) {
+    pub fn block_on<F: Future<Output = ()>+ Send + 'static>(&mut self, fut: F) {
         let queue = self.queue.clone();
-        queue.spawn(fut);
+        queue.spawn(Box::pin(fut));
 
         while queue.run_once() {}
     }
@@ -187,9 +187,12 @@ pub async fn yield_now() {
 #[macro_export]
 macro_rules! join_all {
     ($($fut:expr),+ $(,)?) => {
-        futures::future::join_all(vec![$($fut),+]).await;
+        {
+            $( $fut.await; )+
+        }
     };
 }
+// Usage: join_all!(fut1, fut2, fut3);
 
 // === mini_rt! macro ===
 
