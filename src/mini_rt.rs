@@ -1,11 +1,12 @@
 use std::{
-    collections::{VecDeque, BinaryHeap},
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     thread,
     time::{Duration, Instant},
+    cell::RefCell,
 };
 
 // === MiniRuntime ===
@@ -16,33 +17,15 @@ pub struct MiniRuntime {
 
 impl MiniRuntime {
     pub fn new() -> Self {
-        MiniRuntime {
-            queue: Arc::new(TaskQueue::new()),
-        }
+        let queue = Arc::new(TaskQueue::new());
+        TASK_QUEUE.with(|q| *q.borrow_mut() = queue.clone());
+        MiniRuntime { queue }
     }
 
-    pub fn block_on<F: Future<Output = ()>+ Send + 'static>(&mut self, fut: F) {
-        let queue = self.queue.clone();
-        queue.spawn(Box::pin(fut));
-
-        while queue.run_once() {}
+    pub fn block_on<F: Future<Output = ()> + Send + 'static>(&mut self, fut: F) {
+        self.queue.spawn(Box::pin(fut));
+        while self.queue.run_once() {}
     }
-}
-
-// === Spawning ===
-
-pub fn spawn<F>(future: F) -> JoinHandle
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    let handle = JoinHandle::new();
-    let done = handle.done.clone();
-    let fut = Box::pin(async move {
-        future.await;
-        done.store(true, Ordering::SeqCst);
-    });
-    TASK_QUEUE.with(|q| q.spawn(fut));
-    handle
 }
 
 // === JoinHandle ===
@@ -67,10 +50,30 @@ impl Future for JoinHandle {
         if self.done.load(Ordering::SeqCst) {
             Poll::Ready(())
         } else {
-            cx.waker().wake_by_ref(); // Cooperative re-check
+            cx.waker().wake_by_ref();
             Poll::Pending
         }
     }
+}
+
+// === spawn ===
+
+pub fn spawn<F>(future: F) -> JoinHandle
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let handle = JoinHandle::new();
+    let done = handle.done.clone();
+    let fut = Box::pin(async move {
+        future.await;
+        done.store(true, Ordering::SeqCst);
+    });
+
+    TASK_QUEUE.with(|q| {
+        q.borrow().spawn(fut);
+    });
+
+    handle
 }
 
 // === TaskQueue ===
@@ -96,7 +99,6 @@ impl TaskQueue {
         if let Some(mut fut) = self.tasks.lock().unwrap().pop_front() {
             let waker = dummy_waker();
             let mut cx = Context::from_waker(&waker);
-
             if let Poll::Pending = fut.as_mut().poll(&mut cx) {
                 self.spawn(fut);
             }
@@ -108,10 +110,10 @@ impl TaskQueue {
     }
 }
 
-// === Thread-local task queue access ===
+// === Thread-local access to task queue ===
 
 thread_local! {
-    static TASK_QUEUE: Arc<TaskQueue> = Arc::new(TaskQueue::new());
+    static TASK_QUEUE: RefCell<Arc<TaskQueue>> = RefCell::new(Arc::new(TaskQueue::new()));
 }
 
 // === Dummy waker ===
@@ -159,7 +161,7 @@ impl Future for TimerFuture {
         if Instant::now() >= self.wake_time {
             Poll::Ready(())
         } else {
-            cx.waker().wake_by_ref(); // retry later
+            cx.waker().wake_by_ref();
             Poll::Pending
         }
     }
@@ -182,17 +184,19 @@ pub async fn yield_now() {
     YieldNow.await;
 }
 
-// === join_all! macro ===
+// === join_all! ===
 
 #[macro_export]
 macro_rules! join_all {
     ($($fut:expr),+ $(,)?) => {
         {
-            $( $fut.await; )+
+            let mut handles = vec![$($fut),+];
+            for h in handles.iter_mut() {
+                h.await;
+            }
         }
     };
 }
-// Usage: join_all!(fut1, fut2, fut3);
 
 // === mini_rt! macro ===
 
